@@ -4,12 +4,37 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// DefaultModel is Soul v2 Standard, the MVP image endpoint.
-const DefaultModel = "higgsfield-ai/soul/v2/standard"
+const (
+	// DefaultModel is Soul v2 Standard, the image endpoint used when model is unset.
+	DefaultModel = "higgsfield-ai/soul/v2/standard"
+	// VideoModel is Seedance 2.5 text-to-video, the only supported video endpoint.
+	VideoModel = "bytedance/seedance-2.5/text-to-video"
+)
+
+// Duration is a video length in seconds.
+// The zero Duration means the input was omitted. ExplicitDuration(0) means
+// the caller set zero, which image models reject and video models reject
+// as out of range.
+type Duration struct {
+	seconds int
+	present bool
+}
+
+// ExplicitDuration records a duration the caller set, including zero.
+func ExplicitDuration(seconds int) Duration {
+	return Duration{seconds: seconds, present: true}
+}
+
+// Present reports whether the caller set a duration.
+func (d Duration) Present() bool { return d.present }
+
+// Seconds returns the length. It is zero when the duration was omitted.
+func (d Duration) Seconds() int { return d.seconds }
 
 // Config holds GitHub Action inputs after parsing and validation.
 //
@@ -22,6 +47,7 @@ type Config struct {
 	Model       string
 	AspectRatio string
 	Resolution  string
+	Duration    Duration // video length; zero means omitted
 	Timeout     time.Duration
 }
 
@@ -36,16 +62,22 @@ func FromEnv() (Config, error) {
 		Resolution:  actionInput("resolution"),
 		Timeout:     10 * time.Minute,
 	}
-
 	if cfg.Model == "" {
 		cfg.Model = DefaultModel
-	}
-	if cfg.AspectRatio == "" {
-		cfg.AspectRatio = "4:3"
 	}
 	if cfg.Resolution == "" {
 		cfg.Resolution = "720p"
 	}
+
+	rawDuration := actionInput("duration")
+	if rawDuration != "" {
+		n, err := strconv.Atoi(rawDuration)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid duration %q: %w", rawDuration, err)
+		}
+		cfg.Duration = ExplicitDuration(n)
+	}
+	cfg.applyModelDefaults()
 
 	if raw := actionInput("timeout"); raw != "" {
 		d, err := time.ParseDuration(raw)
@@ -78,12 +110,11 @@ func (c Config) Validate() error {
 	if c.Model == "" {
 		return fmt.Errorf("model is required")
 	}
-	switch c.Resolution {
-	case "", "720p", "1080p":
-	default:
-		return fmt.Errorf("resolution must be 720p or 1080p, got %q", c.Resolution)
+	profile, ok := classify(c.Model)
+	if !ok {
+		return unsupportedModel(c.Model)
 	}
-	return nil
+	return profile.validate(c)
 }
 
 // actionInput reads an Action input from the environment.

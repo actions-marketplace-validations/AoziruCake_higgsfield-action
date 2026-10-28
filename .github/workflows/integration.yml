@@ -4,13 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       prompt:
-        description: Prompt sent to Soul v2
+        description: Prompt sent to the model
         required: false
         default: "A cat programming in Go"
       output:
         description: Output path (workspace-relative)
         required: false
         default: output/integration.png
+      model:
+        description: Model endpoint path. Use bytedance/seedance-2.5/text-to-video for a video run.
+        required: false
+        default: higgsfield-ai/soul/v2/standard
+      duration:
+        description: Duration in seconds for Seedance 2.5 text-to-video. Leave empty for images.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -23,36 +31,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Generate image
+      - name: Generate
         id: higgsfield
         uses: ./
         with:
           api-key: ${{ secrets.HIGGSFIELD_API_KEY }}
           prompt: ${{ inputs.prompt }}
           output: ${{ inputs.output }}
+          model: ${{ inputs.model }}
+          duration: ${{ inputs.duration }}
           timeout: 15m
 
       - name: Verify file exists
+        env:
+          OUTPUT_PATH: ${{ steps.higgsfield.outputs.output-path }}
+          REQUESTED_OUTPUT: ${{ inputs.output }}
         run: |
           set -euo pipefail
-          rel="${{ steps.higgsfield.outputs.output-path }}"
-          case "$rel" in
-            /*)
-              echo "output-path must be workspace-relative, got $rel" >&2
-              exit 1
-              ;;
-          esac
-          test -f "$GITHUB_WORKSPACE/$rel"
-          test -f "$GITHUB_WORKSPACE/${{ inputs.output }}"
+          reject_escape() {
+            case "$1" in
+              /*|..|../*|*/../*|*/..)
+                echo "$2" >&2
+                exit 1
+                ;;
+            esac
+          }
+          reject_escape "$OUTPUT_PATH" "output-path must be workspace-relative"
+          reject_escape "$REQUESTED_OUTPUT" "output must be workspace-relative"
+          test -f "$GITHUB_WORKSPACE/$OUTPUT_PATH"
+          test -f "$GITHUB_WORKSPACE/$REQUESTED_OUTPUT"
 
       - name: Print outputs
+        env:
+          REQUEST_ID: ${{ steps.higgsfield.outputs.request-id }}
+          IMAGE_URL: ${{ steps.higgsfield.outputs.image-url }}
+          VIDEO_URL: ${{ steps.higgsfield.outputs.video-url }}
+          OUTPUT_PATH: ${{ steps.higgsfield.outputs.output-path }}
         run: |
-          echo "request-id=${{ steps.higgsfield.outputs.request-id }}"
-          echo "image-url=${{ steps.higgsfield.outputs.image-url }}"
-          echo "output-path=${{ steps.higgsfield.outputs.output-path }}"
+          printf 'request-id=%s\n' "$REQUEST_ID"
+          printf 'image-url=%s\n' "$IMAGE_URL"
+          printf 'video-url=%s\n' "$VIDEO_URL"
+          printf 'output-path=%s\n' "$OUTPUT_PATH"
 
-      - name: Upload image artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: higgsfield-image
-          path: ${{ inputs.output }}
+          name: ${{ steps.higgsfield.outputs.video-url && 'higgsfield-video' || 'higgsfield-image' }}
+          path: ${{ steps.higgsfield.outputs.output-path }}

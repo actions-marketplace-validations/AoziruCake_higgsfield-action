@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 const (
@@ -28,13 +27,10 @@ type Client struct {
 
 // NewClient builds a Client. apiKey must be KEY_ID:KEY_SECRET.
 func NewClient(apiKey string, httpClient *http.Client) *Client {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 60 * time.Second}
-	}
 	return &Client{
 		baseURL:    DefaultBaseURL,
 		apiKey:     apiKey,
-		httpClient: httpClient,
+		httpClient: pinClient(httpClient),
 	}
 }
 
@@ -46,19 +42,28 @@ func (c *Client) WithBaseURL(baseURL string) *Client {
 
 // SubmitImage starts an asynchronous image generation job.
 func (c *Client) SubmitImage(ctx context.Context, model string, req ImageRequest) (SubmitResponse, error) {
+	return c.submit(ctx, model, req, "submit image")
+}
+
+// SubmitVideo starts an asynchronous Seedance 2.5 text-to-video job.
+func (c *Client) SubmitVideo(ctx context.Context, model string, req VideoRequest) (SubmitResponse, error) {
+	return c.submit(ctx, model, req, "submit video")
+}
+
+func (c *Client) submit(ctx context.Context, model string, payload any, op string) (SubmitResponse, error) {
 	var result SubmitResponse
 	endpoint, err := c.modelURL(model)
 	if err != nil {
 		return result, err
 	}
 
-	body, err := json.Marshal(req)
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return result, fmt.Errorf("encode request: %w", err)
 	}
 
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, body, &result); err != nil {
-		return result, fmt.Errorf("submit image: %w", err)
+		return result, fmt.Errorf("%s: %w", op, err)
 	}
 	// Refuse to poll if the API accepted the HTTP call but omitted identifiers.
 	if err := result.Validate(); err != nil {
@@ -67,11 +72,14 @@ func (c *Client) SubmitImage(ctx context.Context, model string, req ImageRequest
 	return result, nil
 }
 
-// GetStatus fetches the current state from statusURL returned by SubmitImage.
+// GetStatus fetches the current state from statusURL returned by submit.
 func (c *Client) GetStatus(ctx context.Context, statusURL string) (RequestStatus, error) {
 	var result RequestStatus
 	if strings.TrimSpace(statusURL) == "" {
 		return result, fmt.Errorf("status url is required")
+	}
+	if err := c.requireAPIOrigin(statusURL); err != nil {
+		return result, fmt.Errorf("get status: %w", err)
 	}
 	if err := c.doJSON(ctx, http.MethodGet, statusURL, nil, &result); err != nil {
 		return result, fmt.Errorf("get status: %w", err)
@@ -90,6 +98,9 @@ func (c *Client) doJSON(ctx context.Context, method, url string, body []byte, ds
 		reader = bytes.NewReader(body)
 	}
 
+	if err := c.requireAPIOrigin(url); err != nil {
+		return err
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -110,7 +121,14 @@ func (c *Client) modelURL(model string) (string, error) {
 	if model == "" {
 		return "", fmt.Errorf("model is required")
 	}
-	return c.baseURL + "/" + model, nil
+	if strings.Contains(model, "..") || strings.ContainsAny(model, "\\?#@ \t\r\n") {
+		return "", fmt.Errorf("invalid model %q", model)
+	}
+	endpoint := c.baseURL + "/" + model
+	if err := c.requireAPIOrigin(endpoint); err != nil {
+		return "", err
+	}
+	return endpoint, nil
 }
 
 func (c *Client) setHeaders(req *http.Request) {
